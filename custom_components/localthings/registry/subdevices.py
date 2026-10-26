@@ -41,6 +41,7 @@ import time
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 
+from ..legacy_http import cavity_layout, device_type
 from .batch import parse_device0_batch
 from .by_type._base import DeviceRegistry
 
@@ -58,6 +59,13 @@ _UUID_PREFIX_RE = re.compile(r"^/([0-9a-fA-F]{8}(?:-[0-9a-fA-F]{4}){3}-[0-9a-fA-
 # 'don't guess' rule is about. Widen only if a board needs more siblings.
 _SPECULATIVE_DEVICE_INDICES = (1, 2)
 
+def _speculative_indices(resources: dict[str, dict]) -> list[int]:
+    """_SPECULATIVE_DEVICE_INDICES, plus a cavity an 8888 oven's layout
+    puts beyond them (the NW9300MD's lower cavity at 3)."""
+    family = (resources.get("/information/vs/0") or {}).get("x.com.samsung.da.description")
+    options = (resources.get("/mode/vs/0") or {}).get("x.com.samsung.da.options")
+    layout = cavity_layout(family, device_type(options))
+    return sorted({*_SPECULATIVE_DEVICE_INDICES, layout.oven, layout.lower} - {0})
 
 @dataclass(frozen=True)
 class Subdevice:
@@ -449,7 +457,7 @@ def enumerate_subdevices(
         # A board that hides its whole tree from /oic/res gives us nothing
         # to enumerate from -- fall back to the bounded speculative probe
         # this replaces from identity.py.
-        indices = list(_SPECULATIVE_DEVICE_INDICES)
+        indices = _speculative_indices(resources)
     for n in indices:
         timeout = _next_timeout(collection_timeout)
         if timeout is None:

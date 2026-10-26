@@ -31,11 +31,14 @@ from typing import Any
 
 from .legacy_http import (
     TP6X_RAC,
+    CavityLayout,
     Resource,
     StagedKey,
     add_staged,
     batch_steps,
+    cavity_layout,
     course_table,
+    device_type,
     has_cavities,
     http_status_to_coap,
     is_mapped,
@@ -203,7 +206,7 @@ class LegacyHttpTransport:
             if devices is None:
                 self._state_at(index).listed = None
                 return code, None
-            return 0x45, self._listed_rep(index, devices)
+            return 0x45, self._listed_rep(index, devices, self._layout())
         resource = self._by_href.get(href)
         if resource is None:
             # Including /oic/p and /oic/d, which nginx answers with HTML.
@@ -222,6 +225,8 @@ class LegacyHttpTransport:
 
         A sibling's requests share `timeout` between them: setup probes
         /device/1 and /device/2 on every appliance, within one budget."""
+        if index in self._layout().empty:
+            return 0x84, None
         if index:
             deadline = time.monotonic() + timeout
             try:
@@ -240,15 +245,16 @@ class LegacyHttpTransport:
                 # Whether the divider is in decides which modes the upper
                 # cavity offers (with_cavity_modes). An unanswered listing
                 # leaves the divider unknown rather than failing the sweep.
+                layout = self._layout(record)
                 try:
                     _, listing = self._list_devices(timeout)
                 except (OSError, http.client.HTTPException) as err:
                     _LOGGER.debug("%s: /devices for the divider failed: %s", self._host, err)
                     listing = None
                 if listing is None:
-                    self._state_at(1).listed = None
+                    self._state_at(layout.lower).listed = None
                 else:
-                    self._listed_rep(1, listing)
+                    self._listed_rep(layout.lower, listing, layout)
         base = _device_path(index)
         bodies = dict(record)
         for endpoint in _LINKED_ENDPOINTS:
@@ -273,7 +279,11 @@ class LegacyHttpTransport:
             bodies = _with_record_name(bodies, record.get("name"))
         self._state_at(index).last_bodies = bodies
         # Before the modes: a sibling's own listing decides them.
-        listed = self._listed_rep(index, devices) if index and devices is not None else None
+        listed = (
+            self._listed_rep(index, devices, self._layout())
+            if index and devices is not None
+            else None
+        )
         resources = to_resources(
             self._with_modes(index, self._with_staged(index, bodies)), self._table
         )
@@ -324,10 +334,23 @@ class LegacyHttpTransport:
             return 0xA2, None  # 5.02: the bridge answered, with no device list
         return 0x45, devices
 
-    def _listed_rep(self, index: int, devices: list) -> dict[str, str]:
-        listed = any(isinstance(d, dict) and d.get("id") == str(index) for d in devices)
+    def _listed_rep(self, index: int, devices: list, layout: CavityLayout) -> dict[str, str]:
+        record = next(
+            (d for d in devices if isinstance(d, dict) and d.get("id") == str(index)), None
+        )
+        listed = record is not None
+        if record is not None and layout.connected and index == layout.lower:
+            listed = record.get("connected") is not False
         self._state_at(index).listed = listed
         return {_LISTED_FIELD: "On" if listed else "Off"}
+
+    def _layout(self, record: Mapping[str, Any] | None = None) -> CavityLayout:
+        """The cavity layout device 0's record names, or the last sweep's."""
+        if record is None:
+            record = self._state_at(0).last_bodies
+        mode = record.get("Mode")
+        options = mode.get("options") if isinstance(mode, Mapping) else None
+        return cavity_layout(self._family, device_type(options))
 
     def write(self, path_segs: Sequence[str], body: dict | list, timeout: float) -> tuple[int, Any]:
         index, href = self._locate("/" + "/".join(path_segs))
@@ -525,8 +548,10 @@ class LegacyHttpTransport:
         return self._with_course_defaults(state, held)
 
     def _with_modes(self, index: int, bodies: dict[str, Any]) -> dict[str, Any]:
-        # Device 1's listing is the divider, for either cavity.
-        return with_cavity_modes(self._family, bodies, index, self._state_at(index or 1).listed)
+        # The lower cavity's listing is the divider, for either cavity.
+        layout = self._layout()
+        divided = self._state_at(layout.lower).listed
+        return with_cavity_modes(self._family, bodies, index, divided, layout)
 
     def _with_course_defaults(
         self, state: _ApplianceState, bodies: dict[str, Any]

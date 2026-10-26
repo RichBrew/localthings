@@ -230,25 +230,79 @@ def has_cavities(family: str | None) -> bool:
     return _family_key(family) in _LOWER_CAVITY_MODES
 
 
+@dataclass(frozen=True)
+class CavityLayout:
+    """Which `/devices` index is which cavity, on a family with a divider.
+
+    ``oven`` is the whole oven, or its upper cavity with the divider in;
+    ``lower`` is the divider's lower cavity.
+    ``connected`` is set where the lower cavity stays listed with the divider
+    out and says so in its own record's `connected` instead.
+    ``empty`` are slots the board answers for with no cavity behind them.
+    """
+
+    oven: int = 0
+    lower: int = 1
+    connected: bool = False
+    empty: tuple[int, ...] = ()
+
+
+# For a model with no row below: the layout this family was first mapped from.
+UNMAPPED_MODEL = CavityLayout(oven=0, lower=1, connected=False, empty=())
+# A wall oven: the oven at /devices/0, the lower cavity at 1 and listed only
+# while the divider is in (#572).
+FLEX_DUO = CavityLayout(oven=0, lower=1, connected=False, empty=())
+# A microwave over an oven: the microwave at /devices/0, the oven at 2 and its
+# lower cavity at 3, always listed, with nothing at 1.
+MICROWAVE_COMBO = CavityLayout(oven=2, lower=3, connected=True, empty=(1,))
+
+# Keyed by the model in device 0's `DeviceType_` option, less its suffix.
+_MODEL_LAYOUTS: dict[str, CavityLayout] = {
+    "NW9000KW": FLEX_DUO,  # NV51K777OS (#572)
+    "NW9300MD": MICROWAVE_COMBO,
+}
+
+
+def device_type(options: Any) -> str | None:
+    """The model a `DeviceType_` token names, such as NW9300MD/AA0."""
+    for option in options if isinstance(options, list) else ():
+        if isinstance(option, str) and option.startswith("DeviceType_"):
+            return option.removeprefix("DeviceType_")
+    return None
+
+
+def cavity_layout(family: str | None, model: str | None) -> CavityLayout:
+    if not has_cavities(family):
+        return UNMAPPED_MODEL
+    return _MODEL_LAYOUTS.get((model or "").split("/", 1)[0], UNMAPPED_MODEL)
+
+
 def with_cavity_modes(
-    family: str | None, bodies: dict[str, Any], index: int, divided: bool | None
+    family: str | None,
+    bodies: dict[str, Any],
+    index: int,
+    divided: bool | None,
+    layout: CavityLayout = UNMAPPED_MODEL,
 ) -> dict[str, Any]:
     """`bodies` with `Mode.supportedModes` narrowed to what this cavity can
-    run: Upper modes on device 0 with the divider in, unprefixed ones with
-    it out, the family's Lower modes on device 1 and none with the divider
-    out. Device 0's is left as reported while the divider state is unknown.
-    The mode the cavity reports is always kept, so a running cook still
-    reads as one of its options."""
+    run: Upper modes on the oven with the divider in, unprefixed ones with
+    it out, Lower modes on the lower cavity and none with the divider out.
+    The oven's is left as reported while the divider state is unknown, and
+    any other device's always is. The mode the cavity reports is always
+    kept, so a running cook still reads as one of its options."""
     lower = _LOWER_CAVITY_MODES.get(_family_key(family))
     mode = bodies.get("Mode")
-    if lower is None or not isinstance(mode, Mapping):
+    if lower is None or not isinstance(mode, Mapping) or index not in (layout.oven, layout.lower):
         return bodies
     supported = _split_joined(mode.get("supportedModes"))
     if not isinstance(supported, list):
         return bodies
     supported = [m for m in supported if isinstance(m, str)]
-    if index:
-        modes = [_IDLE_MODE] if divided is False else [_IDLE_MODE, *lower]
+    if index == layout.lower:
+        # The NW9300MD's lower cavity lists its own Lower modes; the Flex
+        # Duo's names none, so it takes the family's.
+        own = [m for m in supported if m.startswith("Lower")]
+        modes = [_IDLE_MODE] if divided is False else [_IDLE_MODE, *(own or lower)]
     elif divided is None:
         return bodies
     elif divided:
