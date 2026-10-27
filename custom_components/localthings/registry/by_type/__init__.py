@@ -25,6 +25,7 @@ from . import (
 from . import (
     range as _range,
 )
+from ..capabilities import cook
 from ._base import DeviceRegistry
 
 __all__ = [
@@ -336,6 +337,10 @@ def for_device_by_resources(resources: dict[str, dict]) -> DeviceRegistry | None
         if any(isinstance(m, str) and m.endswith("Bake") for m in supported_modes):
             if "/cooktopmonitoring/vs/0" in resources or "/cooktop/status/vs/0" in resources:
                 return _REGISTRY_BY_KEY["range"]
+            return _REGISTRY_BY_KEY["oven"]
+        # A lower cavity offers no mode at all while its divider is out, and
+        # would otherwise take the master's microwave registry.
+        if cook.cavity(resources) == "Lower":
             return _REGISTRY_BY_KEY["oven"]
     return None
 
